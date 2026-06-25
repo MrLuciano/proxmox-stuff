@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 # =========================================================================================
-# Automated AdGuard Home (LXC) Installation for Proxmox VE 9+
+# Automated AdGuard Home (LXC) Installation for Proxmox VE 9+ (Optimized)
 # =========================================================================================
-# This script creates an ultra-lightweight LXC container using the Debian template,
-# configures the network, and runs the official AdGuard Home installation.
+# This script creates a lightweight LXC container using the Debian template,
+# configures the network, checks for local templates to save bandwidth, 
+# and runs the official AdGuard Home installation.
 # =========================================================================================
 
 set -e # Exit immediately if a command exits with a non-zero status
 
 echo -e "\n🟢 Starting the Proxmox 9 AdGuard Home LXC Builder..."
 
-# 1. Basic Variable Collection
-read -p "Enter the numeric ID for the new LXC (e.g., 105): " CT_ID
-read -p "Enter the network bridge interface (e.g., vmbr1 for Lab, or vmbr0 for LAN): " CT_BRIDGE
-read -p "Enter the static IP with CIDR (e.g., 10.0.0.53/24) or 'dhcp': " CT_IP
+# 1. Automatic ID Collection and User Variables
+CT_ID=$(pvesh get /cluster/nextid)
+echo "👉 Next available ID found: $CT_ID"
+
+read -p "Network bridge interface (e.g., vmbr0, vmbr1) [Default: vmbr1]: " INPUT_BRIDGE < /dev/tty
+CT_BRIDGE=${INPUT_BRIDGE:-vmbr1}
+
+read -p "Static IP with CIDR (e.g., 10.0.0.53/24) or dhcp [Default: dhcp]: " INPUT_IP < /dev/tty
+CT_IP=${INPUT_IP:-dhcp}
+
 if [ "$CT_IP" != "dhcp" ]; then
-    read -p "Enter the Gateway (e.g., 10.0.0.1): " CT_GW
+    read -p "Gateway (e.g., 10.0.0.1): " CT_GW < /dev/tty
 fi
 
 CT_NAME="AdGuard-Home"
@@ -23,25 +30,34 @@ CT_RAM=512
 CT_CORES=1
 CT_DISK=4
 
-# 2. Update and Download the Debian Template
-echo -e "\n⏳ Updating Proxmox template list..."
-pveam update >/dev/null
+# 2. Smart Template Management (Avoids repeated downloads)
+echo -e "\n⏳ Checking for existing Debian templates in Proxmox..."
 
-echo "⏳ Fetching the default Debian template..."
-TEMPLATE=$(pveam available -section system | grep 'debian-12-standard\|debian-13-standard' | awk '{print $2}' | tail -n 1)
+# Scans local storage for a pre-existing Debian template (.tar.zst or .tar.gz)
+LOCAL_TEMPLATE=$(pveam list local 2>/dev/null | grep -E 'debian-12|debian-13' | awk '{print $1}' | tail -n 1) || true
 
-if [ -z "$TEMPLATE" ]; then
-    echo "❌ Error: Debian template not found in Proxmox."
-    exit 1
+if [ -n "$LOCAL_TEMPLATE" ]; then
+    echo "✅ Local template found: $LOCAL_TEMPLATE (Skipping download)"
+    TEMPLATE_PATH="$LOCAL_TEMPLATE"
+else
+    echo "🔍 No local Debian 12/13 template found. Fetching from official repositories..."
+    pveam update >/dev/null
+    ONLINE_TEMPLATE=$(pveam available -section system | grep -E 'debian-12-standard|debian-13-standard' | awk '{print $2}' | tail -n 1)
+    
+    if [ -z "$ONLINE_TEMPLATE" ]; then
+        echo "❌ Error: No Debian template found online or locally."
+        exit 1
+    fi
+    
+    echo "📥 Downloading $ONLINE_TEMPLATE to local storage..."
+    pveam download local "$ONLINE_TEMPLATE" >/dev/null
+    TEMPLATE_PATH="local:vztmpl/$(basename $ONLINE_TEMPLATE)"
 fi
-
-echo "📥 Downloading $TEMPLATE (This may take a few minutes)..."
-pveam download local $TEMPLATE >/dev/null
 
 # 3. Build the LXC Container
 echo -e "\n🛠️ Building LXC Container $CT_ID..."
 if [ "$CT_IP" == "dhcp" ]; then
-    pct create $CT_ID local:vztmpl/$(basename $TEMPLATE) \
+    pct create $CT_ID "$TEMPLATE_PATH" \
         --ostype debian --arch amd64 \
         --hostname $CT_NAME \
         --cores $CT_CORES --memory $CT_RAM --swap 0 \
@@ -50,7 +66,7 @@ if [ "$CT_IP" == "dhcp" ]; then
         --unprivileged 1 \
         --features nesting=1
 else
-    pct create $CT_ID local:vztmpl/$(basename $TEMPLATE) \
+    pct create $CT_ID "$TEMPLATE_PATH" \
         --ostype debian --arch amd64 \
         --hostname $CT_NAME \
         --cores $CT_CORES --memory $CT_RAM --swap 0 \
@@ -60,21 +76,21 @@ else
         --features nesting=1
 fi
 
-# 4. Initialization and Configuration
+# 4. OS Initialization and Configuration
 echo "🚀 Starting the LXC..."
 pct start $CT_ID
-echo "⏳ Waiting for the network to come up (10 seconds)..."
+echo "⏳ Waiting for the network to come up inside the container (10 seconds)..."
 sleep 10
 
 echo "📦 Updating packages in the container and installing curl/sudo..."
 pct exec $CT_ID -- apt-get update -y >/dev/null
 pct exec $CT_ID -- apt-get install -y curl sudo >/dev/null
 
-# 5. Official AdGuard Home Installation
+# 5. Official AdGuard Home Installation via Binary
 echo "🛡️ Installing AdGuard Home..."
 pct exec $CT_ID -- bash -c "curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v"
 
-# 6. Conclusion
+# 6. Conclusion and Credentials Display
 echo -e "\n======================================================================"
 echo "✅ Installation Completed Successfully on Proxmox 9!"
 echo "======================================================================"
@@ -82,9 +98,9 @@ if [ "$CT_IP" == "dhcp" ]; then
     echo "Since you chose DHCP, please check your router for the assigned IP."
     echo "Access the initial setup in your browser at: http://<LXC_IP>:3000"
 else
-    # Extract just the IP without the CIDR notation to display the final URL
     CLEAN_IP=$(echo $CT_IP | cut -d'/' -f1)
     echo "Access the initial setup dashboard at:"
     echo "👉 http://${CLEAN_IP}:3000"
 fi
 echo "======================================================================"
+
