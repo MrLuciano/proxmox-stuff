@@ -4,7 +4,7 @@
 # =========================================================================================
 # This script creates an Arch Linux LXC container, installs ai-memory
 # via native AUR package, and configures it as a system service with
-# Gemini LLM, web UI, and bearer-token auth for LAN access.
+# optional LLM provider, web UI, and bearer-token auth for LAN access.
 # =========================================================================================
 # ai-memory: Long-term memory for AI coding agents
 # https://github.com/akitaonrails/ai-memory
@@ -36,7 +36,33 @@ CT_RAM=1024
 CT_CORES=1
 CT_DISK=8
 
-read -p "Gemini API Key (leave blank to configure later): " GEMINI_API_KEY < /dev/tty
+echo " LLM Provider selection:"
+echo "   1) None (zero-LLM mode - FTS5 search + rule-based summaries)"
+echo "   2) Gemini (free tier - set GEMINI_API_KEY)"
+echo "   3) Anthropic (needs ANTHROPIC_API_KEY)"
+echo "   4) OpenAI (needs OPENAI_API_KEY)"
+echo "   5) Anthropic OAuth (uses Claude subscription)"
+echo "   6) OpenAI OAuth (uses ChatGPT subscription)"
+echo "   7) GitHub Copilot (uses Copilot subscription)"
+read -p "Choose [1-7] (Default: 1): " LLM_CHOICE < /dev/tty
+LLM_CHOICE=${LLM_CHOICE:-1}
+
+LLM_PROVIDER=""
+LLM_API_KEY_NAME=""
+LLM_API_KEY_VALUE=""
+
+case "$LLM_CHOICE" in
+    2) LLM_PROVIDER="gemini"; LLM_API_KEY_NAME="GEMINI_API_KEY" ;;
+    3) LLM_PROVIDER="anthropic"; LLM_API_KEY_NAME="ANTHROPIC_API_KEY" ;;
+    4) LLM_PROVIDER="openai"; LLM_API_KEY_NAME="OPENAI_API_KEY" ;;
+    5) LLM_PROVIDER="anthropic-oauth"; LLM_API_KEY_NAME="ANTHROPIC_OAUTH_TOKEN" ;;
+    6) LLM_PROVIDER="openai-oauth" ;;
+    7) LLM_PROVIDER="copilot"; LLM_API_KEY_NAME="COPILOT_GITHUB_TOKEN" ;;
+esac
+
+if [ -n "$LLM_API_KEY_NAME" ]; then
+    read -p "${LLM_API_KEY_NAME} (leave blank to configure later): " LLM_API_KEY_VALUE < /dev/tty
+fi
 
 # 2. Smart Template Management
 echo -e "\n Checking for existing Arch Linux templates in Proxmox..."
@@ -140,15 +166,16 @@ echo " Generating auth token and writing secrets..."
 AUTH_TOKEN=$(pct exec "$CT_ID" -- ai-memory generate-auth-token | tr -d '\n\r')
 
 TEMP_ENV=$(mktemp)
-cat > "$TEMP_ENV" << EOF
-AI_MEMORY_AUTH_TOKEN=${AUTH_TOKEN}
-AI_MEMORY_LLM_PROVIDER=gemini
-AI_MEMORY_ENABLE_WEB=true
-EOF
-
-if [ -n "$GEMINI_API_KEY" ]; then
-    echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> "$TEMP_ENV"
-fi
+{
+    echo "AI_MEMORY_AUTH_TOKEN=${AUTH_TOKEN}"
+    echo "AI_MEMORY_ENABLE_WEB=true"
+    if [ -n "$LLM_PROVIDER" ]; then
+        echo "AI_MEMORY_LLM_PROVIDER=${LLM_PROVIDER}"
+    fi
+    if [ -n "$LLM_API_KEY_VALUE" ]; then
+        echo "${LLM_API_KEY_NAME}=${LLM_API_KEY_VALUE}"
+    fi
+} > "$TEMP_ENV"
 
 pct push "$CT_ID" "$TEMP_ENV" /etc/ai-memory/env
 rm -f "$TEMP_ENV"
@@ -167,10 +194,14 @@ echo " Hostname:    $CT_NAME"
 echo " Web UI:      http://${CLEAN_IP}:49374/web"
 echo " MCP:         http://${CLEAN_IP}:49374/mcp"
 echo " Auth Token:  $AUTH_TOKEN"
-if [ -n "$GEMINI_API_KEY" ]; then
-    echo " Gemini LLM:  configured"
+if [ -n "$LLM_PROVIDER" ]; then
+    if [ -n "$LLM_API_KEY_VALUE" ]; then
+        echo " LLM:         ${LLM_PROVIDER} (configured)"
+    else
+        echo " LLM:         ${LLM_PROVIDER} (set ${LLM_API_KEY_NAME} in /etc/ai-memory/env and restart)"
+    fi
 else
-    echo " Gemini LLM:  NOT configured (edit /etc/ai-memory/env and restart ai-memory.service)"
+    echo " LLM:         None (zero-LLM mode)"
 fi
 echo ""
 echo " Client setup (on your laptop/workstation):"
