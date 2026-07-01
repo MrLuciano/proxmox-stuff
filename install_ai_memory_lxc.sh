@@ -89,10 +89,13 @@ pct start "$CT_ID"
 echo " Waiting for the OS to boot (20 seconds)..."
 sleep 20
 
+echo " Creating pacman sandbox user (fix for unprivileged LXC)..."
+pct exec "$CT_ID" -- useradd -r alpm 2>/dev/null || true
+
 echo " Updating Arch Linux and installing build tools..."
 pct exec "$CT_ID" -- pacman -Sy --noconfirm archlinux-keyring >/dev/null 2>&1 || true
 pct exec "$CT_ID" -- pacman -Syu --noconfirm >/dev/null 2>&1 || true
-pct exec "$CT_ID" -- pacman -S --noconfirm base-devel git >/dev/null
+pct exec "$CT_ID" -- pacman -S --noconfirm base-devel git >/dev/null 2>&1
 
 echo " Creating build user for AUR package installation..."
 pct exec "$CT_ID" -- useradd -m builduser
